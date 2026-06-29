@@ -1,3 +1,7 @@
+"""
+Written by Dr. Dimas Dutra. Using this as an example of how to use aiofranka library.
+"""
+
 import itertools
 import time
 
