@@ -3,5 +3,5 @@ example_model.py
 franka_env.py
 JointStates_octo_franka_bridge.py
 MoveIt_octo_franka_bridge.py
-aio-franka-circle-demo.py
+aio-franka-circle_demo.py
 .directory
