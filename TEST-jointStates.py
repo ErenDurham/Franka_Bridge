@@ -9,6 +9,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, JointState
+from std_msgs.msg import Float32
 
 TOPIC_IMAGE_PRIMARY = "/camera/primary/image_raw"
 TOPIC_IMAGE_WRIST = "/camera/wrist/image_raw"
@@ -18,6 +19,15 @@ TOPIC_JOINT_STATES = (
 TOPIC_JOINT_CMD = (
     "/gello/joint_states"  # desired joint positions (GELLO middleware input)
 )
+
+# Topic published by the Gello controller: a Float32 in [0.0, 1.0] where
+# 0.0 = fully closed and 1.0 = fully open.
+DEFAULT_GRIPPER_COMMAND_TOPIC = "gripper/gripper_client/target_gripper_width_percent"
+
+
+# Topic this node publishes: a Bool that is True when the gripper is open
+# and False when it is closed.
+DEFAULT_GRIPPER_STATE_TOPIC = "gripper/gripper_client/gripper_is_open"
 
 STEP_DURATION = 0.1  # (10 Hz) step size
 MAX_TIMESTEPS = 200
@@ -72,8 +82,11 @@ class OctoFrankaBridge(Node):
             JointState, TOPIC_JOINT_STATES, self._cb_joint_states, 10
         )
 
-        # Publisher: desired joint states -> GELLO middleware -> robot
+        # Publishers
         self._joint_pub = self.create_publisher(JointState, TOPIC_JOINT_CMD, 10)
+        self._gripper_pub = self.create_publisher(
+            Float32, DEFAULT_GRIPPER_COMMAND_TOPIC, 10
+        )
 
     def _cb_image_primary(self, msg: Image) -> None:
         # store latest primary image
@@ -126,9 +139,11 @@ class OctoFrankaBridge(Node):
         arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, -1)
         return arr[:, :, :3]
 
-    # TODO: Finish gripper stuff
     def open_gripper(self) -> None:
-        self.get_logger().warn("open_gripper: not set up yet :(")
+        self.send_gripper(1.0)
+    
+    def close_gripper(self) -> None:
+        self.send_gripper(0.0)
 
     def publish_joint_state(self, joints_desired: np.ndarray) -> None:
         """Publish desired joint positions as JointState to /gello/joint_states."""
@@ -140,9 +155,9 @@ class OctoFrankaBridge(Node):
         msg.effort = []
         self._joint_pub.publish(msg)
 
-    # TODO: Finish gripper stuff
-    def send_gripper(self, _gripper_value: float) -> None:
-        self.get_logger().warn("send_gripper: not set up yet :(")
+    def send_gripper(self, gripper_value: float) -> None:
+        pct = float(np.clip(gripper_value, 0.0, 1.0))
+        self._gripper_pub.publish(Float32(data=pct))
 
     def read_state(self) -> dict:
         q = self._current_joints if self._current_joints is not None else np.zeros(7)
@@ -226,7 +241,7 @@ def main(argv=None) -> None:
     try:
         node.start_controller()
         node.go_home()
-        node.open_gripper()
+        node.close_gripper()
         node.main()
     finally:
         node.stop_controller()
