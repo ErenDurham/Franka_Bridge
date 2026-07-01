@@ -10,6 +10,8 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, JointState
 from std_msgs.msg import Float32
+from rclpy.action import ActionClient
+from franka_msgs.action import Move as GripperMove
 
 TOPIC_IMAGE_PRIMARY = "/camera/primary/image_raw"
 TOPIC_IMAGE_WRIST = "/camera/wrist/image_raw"
@@ -52,7 +54,7 @@ FR3_JOINTS = [
 
 HOME_JOINTS = np.array([0.0, 0.0, 0.0, -1.57079, 0.0, 1.57079, -0.7853])
 
-# Test target: joint 4 lowered 0.3 rad from home (arm drops slightly)
+# drop a little below home
 TEST_JOINTS = np.array([0.0, 0.0, 0.0, -1.27079, 0.0, 1.57079, -0.7853])
 
 
@@ -63,8 +65,8 @@ class OctoFrankaBridge(Node):
         # image and state buffers
         self._image_primary = None
         self._image_wrist = None
-        self._current_joints = None  # 7-element array from /joint_states
-        self._joints_desired = None  # desired joint positions, seeded after go_home
+        self._current_joints = None 
+        self._joints_desired = None  
 
         # Subscribers
 
@@ -72,16 +74,14 @@ class OctoFrankaBridge(Node):
         self.create_subscription(Image, TOPIC_IMAGE_PRIMARY, self._cb_image_primary, 10)
         self.create_subscription(Image, TOPIC_IMAGE_WRIST, self._cb_image_wrist, 10)
 
-        # get joint positions for state readback and safety checks
+        # get joint positions
         self.create_subscription(
             JointState, TOPIC_JOINT_STATES, self._cb_joint_states, 10
         )
 
         # Publishers
         self._joint_pub = self.create_publisher(JointState, TOPIC_JOINT_CMD, 10)
-        self._gripper_pub = self.create_publisher(
-            Float32, DEFAULT_GRIPPER_COMMAND_TOPIC, 10
-        )
+        self._grip_move_cli = ActionClient(self, GripperMove, "/franka_gripper/move")
 
     def _cb_image_primary(self, msg: Image) -> None:
         # store latest primary image
@@ -151,13 +151,21 @@ class OctoFrankaBridge(Node):
         self._joint_pub.publish(msg)
 
     def send_gripper(self, gripper_value: float) -> None:
-        end_time = time.time() + 5.0
-        while time.time() < end_time:
-            pct = float(np.clip(gripper_value, 0.0, 1.0))
-            self._gripper_pub.publish(Float32(data=pct))
+        """
+        CLI cmd:
+            ros2 action send_goal /franka_gripper/move franka_msgs/action/Move "{width: 0.08, speed: 0.1}"
+            ros2 action send_goal /franka_gripper/move franka_msgs/action/Move "{width: 0.0, speed: 0.1}"
+        """
+        # find if topic is available
+        if not self._grip_move_cli.wait_for_server(timeout_sec=2.0):
+            self.get_logger().warn("franka_gripper/move action server not available!! :(")
+            return
 
-            rclpy.spin_once(self, timeout_sec=0.05)
-            time.sleep(0.05)
+        goal = GripperMove.Goal()
+        goal.width = float(np.clip(gripper_value, 0.0, 1.0)) * 0.08  
+        goal.speed = 0.1
+
+        future = self._grip_move_cli.send_goal_async(goal)
 
         self.get_logger().info("send_gripper complete")
         
@@ -185,10 +193,10 @@ class OctoFrankaBridge(Node):
 
     def convert_action(self, action: np.ndarray) -> tuple[np.ndarray, float]:
         """Convert model action [dq1..dq7, grip] to joints_desired update + gripper scalar."""
-        # NOTE: change += to = if dataset outputs absolute positions instead of deltas.
+        # NOTE: change = to += if dataset outputs deltas.
         lo = np.array(JOINT_LIMITS[0])
         hi = np.array(JOINT_LIMITS[1])
-        self._joints_desired += action[:7]
+        self._joints_desired = action[:7]
         self._joints_desired = np.clip(self._joints_desired, lo, hi)
         return self._joints_desired.copy(), float(action[7])
 
@@ -208,13 +216,11 @@ class OctoFrankaBridge(Node):
             truncated = False
 
             for _timestep in range(MAX_TIMESTEPS):
-                # pace to STEP_DURATION (10 Hz)
                 elapsed = time.time() - last_tstep
                 if elapsed < STEP_DURATION:
                     time.sleep(STEP_DURATION - elapsed)
                 last_tstep = time.time()
 
-                # flush ROS callbacks to update image + joint state buffers
                 rclpy.spin_once(self, timeout_sec=0.02)
 
                 # safety check on actual joint positions from /joint_states
@@ -223,12 +229,8 @@ class OctoFrankaBridge(Node):
                     truncated = True
                     break
 
-                # command the test position directly
-                end_time = time.time() + 5.0
-                while time.time() < end_time:
-                    self.publish_joint_state(TEST_JOINTS)
-                    rclpy.spin_once(self, timeout_sec=0.05)
-                    time.sleep(0.05)
+                # command the test position
+                self.publish_joint_state(TEST_JOINTS)
                 self.get_logger().info("test joint positions complete")
 
                 self.send_gripper(0.0)
@@ -251,7 +253,7 @@ def main(argv=None) -> None:
     node = OctoFrankaBridge()
     try:
         node.start_controller()
-        node.go_home()
+        node.publish_joint_state(HOME_JOINTS)
         node.get_logger().info("Sent home!")
 
         node.close_gripper()
