@@ -223,19 +223,20 @@ class OctoFrankaBridge(Node):
 
                 rclpy.spin_once(self, timeout_sec=0.02)
 
+                # check if data is being truncated
+                self.get_logger().info(
+                    f"step {_timestep}: joints={self._current_joints}, safe={self.safety_check()}"
+                )
+
                 # safety check on actual joint positions from /joint_states
                 if not self.safety_check():
-                    self.get_logger().warn("Joint limits exceeded. truncating episode.")
+                    self.get_logger().error("Joint limits exceeded — truncating episode.")
                     truncated = True
                     break
 
                 # command the test position
                 self.publish_joint_state(TEST_JOINTS)
-                self.get_logger().info("test joint positions complete")
-
-                self.send_gripper(0.0)
-
-                # self.get_logger().info("Closed Gripper and sent Joint states.")
+                self.get_logger().info(f"step {_timestep}: published TEST_JOINTS")
 
             # Episode ended: hold position
             self.toggle_servo(start=False)
