@@ -22,12 +22,7 @@ TOPIC_JOINT_CMD = (
 
 # Topic published by the Gello controller: a Float32 in [0.0, 1.0] where
 # 0.0 = fully closed and 1.0 = fully open.
-DEFAULT_GRIPPER_COMMAND_TOPIC = "gripper/gripper_client/target_gripper_width_percent"
-
-
-# Topic this node publishes: a Bool that is True when the gripper is open
-# and False when it is closed.
-DEFAULT_GRIPPER_STATE_TOPIC = "gripper/gripper_client/gripper_is_open"
+DEFAULT_GRIPPER_COMMAND_TOPIC = "/gripper/gripper_client/target_gripper_width_percent"
 
 STEP_DURATION = 0.1  # (10 Hz) step size
 MAX_TIMESTEPS = 200
@@ -58,7 +53,7 @@ FR3_JOINTS = [
 HOME_JOINTS = np.array([0.0, 0.0, 0.0, -1.57079, 0.0, 1.57079, -0.7853])
 
 # Test target: joint 4 lowered 0.3 rad from home (arm drops slightly)
-TEST_JOINTS = np.array([0.0, 0.0, 0.0, -1.87079, 0.0, 1.57079, -0.7853])
+TEST_JOINTS = np.array([0.0, 0.0, 0.0, -1.27079, 0.0, 1.57079, -0.7853])
 
 
 class OctoFrankaBridge(Node):
@@ -156,8 +151,16 @@ class OctoFrankaBridge(Node):
         self._joint_pub.publish(msg)
 
     def send_gripper(self, gripper_value: float) -> None:
-        pct = float(np.clip(gripper_value, 0.0, 1.0))
-        self._gripper_pub.publish(Float32(data=pct))
+        end_time = time.time() + 5.0
+        while time.time() < end_time:
+            pct = float(np.clip(gripper_value, 0.0, 1.0))
+            self._gripper_pub.publish(Float32(data=pct))
+
+            rclpy.spin_once(self, timeout_sec=0.05)
+            time.sleep(0.05)
+
+        self.get_logger().info("send_gripper complete")
+        
 
     def read_state(self) -> dict:
         q = self._current_joints if self._current_joints is not None else np.zeros(7)
@@ -221,8 +224,16 @@ class OctoFrankaBridge(Node):
                     break
 
                 # command the test position directly
-                self.publish_joint_state(TEST_JOINTS)
+                end_time = time.time() + 5.0
+                while time.time() < end_time:
+                    self.publish_joint_state(TEST_JOINTS)
+                    rclpy.spin_once(self, timeout_sec=0.05)
+                    time.sleep(0.05)
+                self.get_logger().info("test joint positions complete")
+
                 self.send_gripper(0.0)
+
+                # self.get_logger().info("Closed Gripper and sent Joint states.")
 
             # Episode ended: hold position
             self.toggle_servo(start=False)
@@ -241,7 +252,10 @@ def main(argv=None) -> None:
     try:
         node.start_controller()
         node.go_home()
+        node.get_logger().info("Sent home!")
+
         node.close_gripper()
+        node.get_logger().info("Gripper Closed!")
         node.main()
     finally:
         node.stop_controller()
