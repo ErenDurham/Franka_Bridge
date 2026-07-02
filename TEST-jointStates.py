@@ -57,7 +57,7 @@ FR3_JOINTS = [
 HOME_JOINTS = np.array([0.0, 0.0, 0.0, -1.57079, 0.0, 1.57079, -0.7853])
 
 # drop a little below home
-TEST_JOINTS = np.array([0.0, 0.2, 0.0, -1.27079, 0.0, 1.57079, -0.4853])
+TEST_JOINTS = np.array([0.0, 0.4, 0.0, -1.17079, 0.0, 1.57079, -0.1853])
 
 
 class OctoFrankaBridge(Node):
@@ -237,7 +237,7 @@ class OctoFrankaBridge(Node):
             truncated = False
 
             self.get_logger().info("Ramping to TEST_JOINTS over 3 s...")
-            self.ramp_to(TEST_JOINTS, duration=3.0)
+            self.ramp_to(TEST_JOINTS, duration=1.0)
             self.get_logger().info(f"At TEST_JOINTS. actual={self._current_joints}")
 
             # Hold at the test position and monitor safety.
