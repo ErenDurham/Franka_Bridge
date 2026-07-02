@@ -1,8 +1,10 @@
 """
 Code to bridge the octo model and the Franka robot
+
 Utilizing sensor_msgs/JointState published to /gello/joint_states to command joint positions
 """
 
+import threading
 import time
 import numpy as np
 from functools import partial
@@ -11,9 +13,13 @@ import jax
 import jax.numpy as jnp
 import cv2
 import rclpy
+import rclpy.executors
 from absl import app, flags
 from rclpy.node import Node
 from sensor_msgs.msg import Image, JointState
+from std_msgs.msg import Float32
+from rclpy.action import ActionClient
+from franka_msgs.action import Move as GripperMove
 from octo.model.octo_model import OctoModel
 import click
 
@@ -21,11 +27,19 @@ FLAGS = flags.FLAGS
 
 TOPIC_IMAGE_PRIMARY = "/camera/primary/image_raw"
 TOPIC_IMAGE_WRIST = "/camera/wrist/image_raw"
-TOPIC_JOINT_STATES = "/joint_states"      # robot's actual state (franka joint_state_broadcaster)
-TOPIC_JOINT_CMD = "/gello/joint_states"   # desired joint positions (GELLO middleware input)
+TOPIC_JOINT_STATES = (
+    "/joint_states"  # robot's actual state
+)
+TOPIC_JOINT_CMD = (
+    "/gello/joint_states"  # desired joint positions
+)
+
+# Topic published by the Gello controller: a Float32 in [0.0, 1.0] where
+# 0.0 = fully closed and 1.0 = fully open.
+DEFAULT_GRIPPER_COMMAND_TOPIC = "/gripper/gripper_client/target_gripper_width_percent"
 
 STEP_DURATION = 0.1  # (10 Hz) step size
-MAX_TIMESTEPS = 200  
+MAX_TIMESTEPS = 200
 
 # Gripper controls
 GRIPPER_OPEN_WIDTH = 0.08  # meters
@@ -36,13 +50,18 @@ GRIPPER_THRESHOLD = 0.5  # action[-1] > threshold -> open, else close
 
 # FR3 software joint position limits from franka_description/robots/fr3/joint_limits.yaml
 JOINT_LIMITS = [
-    [-2.3093, -1.5133, -2.4937, -2.7478, -2.4800,  0.8521, -2.6895],
-    [ 2.3093,  1.5133,  2.4937, -0.4461,  2.4800,  4.2094,  2.6895],
+    [-2.3093, -1.5133, -2.4937, -2.7478, -2.4800, 0.8521, -2.6895],
+    [2.3093, 1.5133, 2.4937, -0.4461, 2.4800, 4.2094, 2.6895],
 ]
 
 FR3_JOINTS = [
-    "fr3_joint1", "fr3_joint2", "fr3_joint3", "fr3_joint4",
-    "fr3_joint5", "fr3_joint6", "fr3_joint7",
+    "fr3_joint1",
+    "fr3_joint2",
+    "fr3_joint3",
+    "fr3_joint4",
+    "fr3_joint5",
+    "fr3_joint6",
+    "fr3_joint7",
 ]
 
 HOME_JOINTS = np.array([0.0, 0.0, 0.0, -1.57079, 0.0, 1.57079, -0.7853])
@@ -60,8 +79,7 @@ class OctoFrankaBridge(Node):
         # image and state buffers
         self._image_primary = None
         self._image_wrist = None
-        self._current_joints = None  # 7-element array from /joint_states
-        self._joints_desired = None  # desired joint positions, seeded after go_home
+        self._current_joints = None
         self.model = None
 
         # Subscribers
@@ -70,11 +88,19 @@ class OctoFrankaBridge(Node):
         self.create_subscription(Image, TOPIC_IMAGE_PRIMARY, self._cb_image_primary, 10)
         self.create_subscription(Image, TOPIC_IMAGE_WRIST, self._cb_image_wrist, 10)
 
-        # get joint positions for state readback and safety checks
-        self.create_subscription(JointState, TOPIC_JOINT_STATES, self._cb_joint_states, 10)
+        # get joint positions
+        self.create_subscription(
+            JointState, TOPIC_JOINT_STATES, self._cb_joint_states, 10
+        )
 
-        # Publisher: desired joint states -> GELLO middleware -> robot
+        # Publishers
         self._joint_pub = self.create_publisher(JointState, TOPIC_JOINT_CMD, 10)
+        self._grip_move_cli = ActionClient(self, GripperMove, "/franka_gripper/move")
+
+        # Creating a timer to ensure there's continuous publishing of joint states
+        self._joints_desired = HOME_JOINTS.copy()
+        self._joints_lock = threading.Lock()
+        self.create_timer(0.05, self._timer_publish_joints)
 
     def _cb_image_primary(self, msg: Image) -> None:
         # store latest primary image
@@ -94,6 +120,15 @@ class OctoFrankaBridge(Node):
         except ValueError:
             self._current_joints = np.array(msg.position[:7])
 
+    def _timer_publish_joints(self) -> None:
+        with self._joints_lock:
+            joints = self._joints_desired.copy()
+        self.publish_joint_state(joints)
+
+    def set_desired_joints(self, joints: np.ndarray) -> None:
+        with self._joints_lock:
+            self._joints_desired = joints.copy()
+
     def load_model(self) -> None:
         self.model = OctoModel.load_pretrained(
             FLAGS.checkpoint_weights_path,
@@ -105,31 +140,37 @@ class OctoFrankaBridge(Node):
             raise KeyError(f"'2026_Data' not in dataset_statistics. Available: {keys}")
 
     def start_controller(self) -> None:
-        # spin until first joint state message arrives
         while self._current_joints is None:
-            rclpy.spin_once(self, timeout_sec=0.1)
+            time.sleep(0.1)
             self.get_logger().info("Waiting for joint states...")
-        self.get_logger().info("Joint states received, controller ready.")
+        self.get_logger().info("Joint states received, controller ready")
 
     def stop_controller(self) -> None:
-        self.get_logger().info("Episode stopped, holding last joint position.")
+        self.get_logger().info("Episode stopped, holding last joint position")
 
     def toggle_servo(self, start=True):
         if start:
-            # seed desired joints from current state so controller engages without a jump
-            rclpy.spin_once(self, timeout_sec=0.1)
-            self._joints_desired = self._current_joints.copy()
+            if self._current_joints is not None:
+                self.set_desired_joints(self._current_joints)
             self.get_logger().info("Joint controller started")
         else:
             self.get_logger().info("Joint controller stopped, holding position")
 
-    def go_home(self) -> None:
-        """Move to home joint configuration."""
-        end_time = time.time() + 5.0
-        while time.time() < end_time:
-            self.publish_joint_state(HOME_JOINTS)
-            rclpy.spin_once(self, timeout_sec=0.05)
+    def ramp_to(self, target: np.ndarray, duration: float = 3.0) -> None:
+        """
+        Moves to target pose over the desired seconds.
+        """
+        with self._joints_lock:
+            start = self._joints_desired.copy()
+        steps = max(1, int(duration / 0.05))  # 20 Hz
+        for i in range(steps + 1):
+            alpha = i / steps
+            self.set_desired_joints(start + alpha * (target - start))
             time.sleep(0.05)
+
+    def go_home(self) -> None:
+        """Ramp to HOME_JOINTS over 5 s."""
+        self.ramp_to(HOME_JOINTS, duration=5.0)
         self.get_logger().info("go_home complete")
 
     def _ros_image_to_numpy(self, msg: Image) -> np.ndarray:
@@ -137,9 +178,11 @@ class OctoFrankaBridge(Node):
         arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, -1)
         return arr[:, :, :3]
 
-    # TODO: Finish gripper stuff
     def open_gripper(self) -> None:
-        self.get_logger().warn("open_gripper: not set up yet :(")
+        self.send_gripper(1.0)
+
+    def close_gripper(self) -> None:
+        self.send_gripper(0.0)
 
     def publish_joint_state(self, joints_desired: np.ndarray) -> None:
         """Publish desired joint positions as JointState to /gello/joint_states."""
@@ -151,9 +194,25 @@ class OctoFrankaBridge(Node):
         msg.effort = []
         self._joint_pub.publish(msg)
 
-    # TODO: Finish gripper stuff
-    def send_gripper(self, _gripper_value: float) -> None:
-        self.get_logger().warn("send_gripper: not set up yet :(")
+    def send_gripper(self, gripper_value: float) -> None:
+        """
+        CLI cmd:
+            ros2 action send_goal /franka_gripper/move franka_msgs/action/Move "{width: 0.08, speed: 0.1}"
+            ros2 action send_goal /franka_gripper/move franka_msgs/action/Move "{width: 0.0, speed: 0.1}"
+        """
+        # find if topic is available
+        if not self._grip_move_cli.wait_for_server(timeout_sec=2.0):
+            self.get_logger().warn("franka_gripper/move action server not available!! :(")
+            return
+
+        goal = GripperMove.Goal()
+        goal.width = float(np.clip(gripper_value, 0.0, 1.0)) * 0.08
+        goal.speed = 0.1
+
+        future = self._grip_move_cli.send_goal_async(goal)
+
+        self.get_logger().info("send_gripper complete")
+
 
     def read_state(self) -> dict:
         q = self._current_joints if self._current_joints is not None else np.zeros(7)
@@ -174,8 +233,6 @@ class OctoFrankaBridge(Node):
             self.get_logger().info("Images not found. Using null images....")
             self._image_primary = np.zeros((img_size, img_size, 3), dtype=np.uint8)
             self._image_wrist = np.zeros((img_size, img_size, 3), dtype=np.uint8)
-        else:
-            self.get_logger().info("Images FOUND!!! :D")
         return self._image_primary, self._image_wrist
 
     def convert_action(self, action: np.ndarray) -> tuple[np.ndarray, float]:
@@ -206,8 +263,6 @@ class OctoFrankaBridge(Node):
                     "2026_Data"
                 ]["action"],
             )
-            # sample_actions returns (batch, action_horizon, action_dim);
-            # [0, 0] selects first batch item, first predicted timestep -> (action_dim,)
             return actions[0, 0]
 
         policy_fn = supply_rng(partial(_sample_actions, self.model))
@@ -226,7 +281,6 @@ class OctoFrankaBridge(Node):
                 # Check if new goal image is needed
                 if click.confirm("Take a new goal?", default=True):
                     input("Move arm to goal pose, then press [Enter] to capture.")
-                    rclpy.spin_once(self, timeout_sec=0.5)
                     primary, _ = self.grab_image(im_size)
                     if isinstance(primary, Image):
                         raw = self._ros_image_to_numpy(primary)  # format image
@@ -266,9 +320,6 @@ class OctoFrankaBridge(Node):
                 if elapsed < STEP_DURATION:
                     time.sleep(STEP_DURATION - elapsed)
                 last_tstep = time.time()
-
-                # flush ROS callbacks to update image + joint state buffers
-                rclpy.spin_once(self, timeout_sec=0.02)
 
                 # build observations from latest camera frames
                 primary, wrist = self.grab_image(im_size)
@@ -313,20 +364,16 @@ class OctoFrankaBridge(Node):
                 action = np.array(policy_fn(obs, task), dtype=np.float64)
                 self.get_logger().info(f"forward pass: {time.time() - t0:.3f}s")
 
-                # safety check on actual joint positions from /joint_states
                 if not self.safety_check():
-                    self.get_logger().warn(
-                        "Joint limits exceeded. truncating episode."
-                    )
+                    self.get_logger().error("Joint limits exceeded — truncating episode.")
                     truncated = True
                     break
 
                 # joints_desired update -> /gello/joint_states, gripper -> placeholder
                 joints_desired, gripper_val = self.convert_action(action)
-                self.publish_joint_state(joints_desired)
+                self.set_desired_joints(joints_desired)
                 self.send_gripper(gripper_val)
 
-            
             # Episode ended: hold position
             self.toggle_servo(start=False)
 
@@ -341,14 +388,25 @@ class OctoFrankaBridge(Node):
 def main(argv=None) -> None:
     rclpy.init(args=argv)
     node = OctoFrankaBridge()
+
+    # continously running the executor in background to ensure it's firing @ 20 Hz for gello
+    executor = rclpy.executors.SingleThreadedExecutor()
+    executor.add_node(node)
+    spin_thread = threading.Thread(target=executor.spin, daemon=True)
+    spin_thread.start()
+
     try:
         node.load_model()
         node.start_controller()
         node.go_home()
-        node.open_gripper()
+        node.get_logger().info("home!!")
+
+        node.close_gripper()
+        node.get_logger().info("Gripper closed!")
         node.main()
     finally:
         node.stop_controller()
+        executor.shutdown()
         node.destroy_node()
         rclpy.shutdown()
 
