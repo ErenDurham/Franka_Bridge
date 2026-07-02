@@ -57,7 +57,7 @@ FR3_JOINTS = [
 HOME_JOINTS = np.array([0.0, 0.0, 0.0, -1.57079, 0.0, 1.57079, -0.7853])
 
 # drop a little below home
-TEST_JOINTS = np.array([0.0, 0.0, 0.0, -1.27079, 0.0, 1.57079, -0.7853])
+TEST_JOINTS = np.array([0.0, 0.2, 0.0, -1.27079, 0.0, 1.57079, -0.4853])
 
 
 class OctoFrankaBridge(Node):
@@ -133,10 +133,21 @@ class OctoFrankaBridge(Node):
         else:
             self.get_logger().info("Joint controller stopped, holding position")
 
+    def ramp_to(self, target: np.ndarray, duration: float = 3.0) -> None:
+        """
+        Moves to target pose over the desired seconds.
+        """
+        with self._joints_lock:
+            start = self._joints_desired.copy()
+        steps = max(1, int(duration / 0.05))  # 20 Hz
+        for i in range(steps + 1):
+            alpha = i / steps
+            self.set_desired_joints(start + alpha * (target - start))
+            time.sleep(0.05)
+
     def go_home(self) -> None:
-        """send to home and wait 5s"""
-        self.set_desired_joints(HOME_JOINTS)
-        time.sleep(5.0)
+        """Ramp to HOME_JOINTS over 5 s."""
+        self.ramp_to(HOME_JOINTS, duration=5.0)
         self.get_logger().info("go_home complete")
 
     def _ros_image_to_numpy(self, msg: Image) -> np.ndarray:
@@ -225,6 +236,11 @@ class OctoFrankaBridge(Node):
             last_tstep = time.time()
             truncated = False
 
+            self.get_logger().info("Ramping to TEST_JOINTS over 3 s...")
+            self.ramp_to(TEST_JOINTS, duration=3.0)
+            self.get_logger().info(f"At TEST_JOINTS. actual={self._current_joints}")
+
+            # Hold at the test position and monitor safety.
             for _timestep in range(MAX_TIMESTEPS):
                 elapsed = time.time() - last_tstep
                 if elapsed < STEP_DURATION:
@@ -236,8 +252,7 @@ class OctoFrankaBridge(Node):
                     truncated = True
                     break
 
-                self.set_desired_joints(TEST_JOINTS)
-                self.get_logger().info(f"step {_timestep}: sent the test joints, actual={self._current_joints}")
+                self.get_logger().info(f"step {_timestep}: actual={self._current_joints}")
 
             # Episode ended: hold position
             self.toggle_servo(start=False)
