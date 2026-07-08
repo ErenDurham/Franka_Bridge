@@ -1,7 +1,10 @@
 """
 Code to bridge the octo model and the Franka robot
-
 Utilizing sensor_msgs/JointState published to /gello/joint_states to command joint positions
+
+To run:
+conda activate octo
+python3 Franka_Bridge/JointStates_octo_franka_bridge.py --checkpoint_weights_path="/home/faro/octo_fr3/checkpoints/octo_fr3_finetune/experiment_20260706_171000" --checkpoint_step="2000"
 """
 
 import threading
@@ -16,6 +19,7 @@ import rclpy
 import rclpy.executors
 from absl import app, flags
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image, JointState
 from std_msgs.msg import Float32
 from rclpy.action import ActionClient
@@ -33,6 +37,11 @@ TOPIC_JOINT_STATES = (
 TOPIC_JOINT_CMD = (
     "/gello/joint_states"  # desired joint positions
 )
+TOPIC_GRIPPER_STATE = "/franka_gripper/joint_states"  # actual finger positions
+
+IMG_SIZE_PRIMARY = 256
+IMG_SIZE_WRIST = 128
+WINDOW_SIZE = 1
 
 # Topic published by the Gello controller: a Float32 in [0.0, 1.0] where
 # 0.0 = fully closed and 1.0 = fully open.
@@ -40,13 +49,14 @@ DEFAULT_GRIPPER_COMMAND_TOPIC = "/gripper/gripper_client/target_gripper_width_pe
 
 STEP_DURATION = 0.1  # (10 Hz) step size
 MAX_TIMESTEPS = 200
+JOINT_SMOOTH_ALPHA = 0.25
 
 # Gripper controls
 GRIPPER_OPEN_WIDTH = 0.08  # meters
 GRIPPER_CLOSE_WIDTH = 0.0
 GRIPPER_SPEED = 0.1  # m/s
 GRIPPER_FORCE = 10.0  # N
-GRIPPER_THRESHOLD = 0.5  # action[-1] > threshold -> open, else close
+GRIPPER_THRESHOLD = 0.5  
 
 # FR3 software joint position limits from franka_description/robots/fr3/joint_limits.yaml
 JOINT_LIMITS = [
@@ -80,17 +90,25 @@ class OctoFrankaBridge(Node):
         self._image_primary = None
         self._image_wrist = None
         self._current_joints = None
+        self._gripper_width = 0.0
+        self._gripper_is_open = None
         self.model = None
 
         # Subscribers
 
         # subscribe to primary and wrist camera images
-        self.create_subscription(Image, TOPIC_IMAGE_PRIMARY, self._cb_image_primary, 10)
-        self.create_subscription(Image, TOPIC_IMAGE_WRIST, self._cb_image_wrist, 10)
+        image_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
+        self.create_subscription(Image, TOPIC_IMAGE_PRIMARY, self._cb_image_primary, image_qos)
+        self.create_subscription(Image, TOPIC_IMAGE_WRIST, self._cb_image_wrist, image_qos)
 
         # get joint positions
         self.create_subscription(
             JointState, TOPIC_JOINT_STATES, self._cb_joint_states, 10
+        )
+
+        # get gripper finger positions (width = sum of both fingers)
+        self.create_subscription(
+            JointState, TOPIC_GRIPPER_STATE, self._cb_gripper_state, 10
         )
 
         # Publishers
@@ -120,6 +138,13 @@ class OctoFrankaBridge(Node):
         except ValueError:
             self._current_joints = np.array(msg.position[:7])
 
+    def _cb_gripper_state(self, msg: JointState) -> None:
+        # franka_gripper publishes width/2 on each of the two finger joints
+        if len(msg.position) >= 2:
+            self._gripper_width = float(msg.position[0] + msg.position[1])
+        elif len(msg.position) == 1:
+            self._gripper_width = float(msg.position[0])
+
     def _timer_publish_joints(self) -> None:
         with self._joints_lock:
             joints = self._joints_desired.copy()
@@ -136,22 +161,23 @@ class OctoFrankaBridge(Node):
         )
         keys = list(self.model.dataset_statistics.keys())
         self.get_logger().info(f"Dataset statistics keys: {keys}")
-        if "2026_Data" not in self.model.dataset_statistics:
-            raise KeyError(f"'2026_Data' not in dataset_statistics. Available: {keys}")
+        if "action" not in self.model.dataset_statistics:
+            raise KeyError(f"'action' not in dataset_statistics. Available: {keys}")
 
     def start_controller(self) -> None:
+        # spin until first joint state message arrives
         while self._current_joints is None:
             time.sleep(0.1)
             self.get_logger().info("Waiting for joint states...")
         self.get_logger().info("Joint states received, controller ready")
 
     def stop_controller(self) -> None:
-        self.get_logger().info("Episode stopped, holding last joint position")
+        self.get_logger().info("Episode stopped, holding last joint position.")
 
     def toggle_servo(self, start=True):
         if start:
             if self._current_joints is not None:
-                self.set_desired_joints(self._current_joints)
+                self.ramp_to(self._current_joints, duration=STEP_DURATION)
             self.get_logger().info("Joint controller started")
         else:
             self.get_logger().info("Joint controller stopped, holding position")
@@ -200,25 +226,33 @@ class OctoFrankaBridge(Node):
             ros2 action send_goal /franka_gripper/move franka_msgs/action/Move "{width: 0.08, speed: 0.1}"
             ros2 action send_goal /franka_gripper/move franka_msgs/action/Move "{width: 0.0, speed: 0.1}"
         """
+        target_open = gripper_value > GRIPPER_THRESHOLD
+        if target_open == self._gripper_is_open:
+            return
+
         # find if topic is available
         if not self._grip_move_cli.wait_for_server(timeout_sec=2.0):
             self.get_logger().warn("franka_gripper/move action server not available!! :(")
             return
 
         goal = GripperMove.Goal()
-        goal.width = float(np.clip(gripper_value, 0.0, 1.0)) * 0.08
-        goal.speed = 0.1
+        goal.width = GRIPPER_OPEN_WIDTH if target_open else GRIPPER_CLOSE_WIDTH
+        goal.speed = GRIPPER_SPEED
 
         future = self._grip_move_cli.send_goal_async(goal)
+        self._gripper_is_open = target_open
 
-        self.get_logger().info("send_gripper complete")
+        self.get_logger().info(f"send_gripper: {'open' if target_open else 'close'}")
 
 
     def read_state(self) -> dict:
         q = self._current_joints if self._current_joints is not None else np.zeros(7)
+        
+        # checkpoint expects 8-dim proprio: 7 arm joints + 1 gripper width
+        proprio = np.concatenate([q, [self._gripper_width]]).astype(np.float32)
         return {
             "joints": q,
-            "proprio": q.astype(np.float32),
+            "proprio": proprio,
         }
 
     def safety_check(self) -> bool:
@@ -227,48 +261,57 @@ class OctoFrankaBridge(Node):
         lo, hi = JOINT_LIMITS
         return all(lo[i] <= self._current_joints[i] <= hi[i] for i in range(7))
 
-    def grab_image(self, img_size):
-        # return (primary, wrist) or null obs if images unavailable
-        if self._image_primary is None or self._image_wrist is None:
-            self.get_logger().info("Images not found. Using null images....")
-            self._image_primary = np.zeros((img_size, img_size, 3), dtype=np.uint8)
-            self._image_wrist = np.zeros((img_size, img_size, 3), dtype=np.uint8)
-        return self._image_primary, self._image_wrist
+    def grab_image(self):
+        # return (primary, wrist), substituting null images per-camera if unavailable
+        if self._image_primary is None:
+            self.get_logger().info("Primary image not found. Using null image....")
+            primary = np.zeros((IMG_SIZE_PRIMARY, IMG_SIZE_PRIMARY, 3), dtype=np.uint8)
+        else:
+            primary = self._image_primary
+        if self._image_wrist is None:
+            self.get_logger().info("Wrist image not found. Using null image....")
+            wrist = np.zeros((IMG_SIZE_WRIST, IMG_SIZE_WRIST, 3), dtype=np.uint8)
+        else:
+            wrist = self._image_wrist
+        return primary, wrist
 
     def convert_action(self, action: np.ndarray) -> tuple[np.ndarray, float]:
-        """Convert model action [dq1..dq7, grip] to joints_desired update + gripper scalar."""
-        # NOTE: change = to += if dataset outputs deltas.
+        """Smooths the actions"""
+        
         lo = np.array(JOINT_LIMITS[0])
         hi = np.array(JOINT_LIMITS[1])
-        self._joints_desired = action[:7]
-        self._joints_desired = np.clip(self._joints_desired, lo, hi)
-        return self._joints_desired.copy(), float(action[7])
+        target = np.clip(action[:7], lo, hi)
+
+        with self._joints_lock:
+            prev = self._joints_desired.copy()
+        smoothed = JOINT_SMOOTH_ALPHA * target + (1.0 - JOINT_SMOOTH_ALPHA) * prev
+
+        return smoothed, float(action[7])
 
     # Main loop
-    def main(self, im_size: int = 256, window_size: int = 2) -> None:
+    def main(self, window_size: int = WINDOW_SIZE) -> None:
         """
         Runs inference episode
         Builds function, obtains task/goal image, and runs the inference
         """
 
         # Build the inference function
-        # TODO: Change the path to the dataset
         def _sample_actions(pretrained_model, observations, tasks, rng):
             observations = jax.tree_map(lambda x: x[None], observations)
             actions = pretrained_model.sample_actions(
                 observations,
                 tasks,
                 rng=rng,
-                unnormalization_statistics=pretrained_model.dataset_statistics[
-                    "2026_Data"
-                ]["action"],
+                unnormalization_statistics=pretrained_model.dataset_statistics["action"],
             )
+            # sample_actions returns (batch, action_horizon, action_dim);
+            # [0, 0] selects first batch item, first predicted timestep -> (action_dim,)
             return actions[0, 0]
 
         policy_fn = supply_rng(partial(_sample_actions, self.model))
 
-        goal_image = jnp.zeros((im_size, im_size, 3), dtype=np.uint8)
-        goal_instruction = ""
+        goal_image = jnp.zeros((IMG_SIZE_PRIMARY, IMG_SIZE_PRIMARY, 3), dtype=np.uint8)
+        goal_instruction = "Pick up the green pepper and put it in the bin"
 
         while True:
             # Goal selection
@@ -281,10 +324,10 @@ class OctoFrankaBridge(Node):
                 # Check if new goal image is needed
                 if click.confirm("Take a new goal?", default=True):
                     input("Move arm to goal pose, then press [Enter] to capture.")
-                    primary, _ = self.grab_image(im_size)
+                    primary, _ = self.grab_image()
                     if isinstance(primary, Image):
                         raw = self._ros_image_to_numpy(primary)  # format image
-                        goal_image = cv2.resize(raw, (im_size, im_size))
+                        goal_image = cv2.resize(raw, (IMG_SIZE_PRIMARY, IMG_SIZE_PRIMARY))
                     else:
                         goal_image = primary  # null fallback from grab_image
                 task = self.model.create_tasks(
@@ -300,7 +343,7 @@ class OctoFrankaBridge(Node):
                     goal_instruction = input("Instruction? ")
                 task = self.model.create_tasks(texts=[goal_instruction])
                 goal_image = jnp.zeros(
-                    (im_size, im_size, 3), dtype=np.uint8
+                    (IMG_SIZE_PRIMARY, IMG_SIZE_PRIMARY, 3), dtype=np.uint8
                 )  # empty goal image
 
             else:
@@ -322,14 +365,16 @@ class OctoFrankaBridge(Node):
                 last_tstep = time.time()
 
                 # build observations from latest camera frames
-                primary, wrist = self.grab_image(im_size)
+                prev_stamp = getattr(self, "_last_img_stamp", None)
+
+                primary, wrist = self.grab_image()
                 img_primary = (
-                    cv2.resize(self._ros_image_to_numpy(primary), (im_size, im_size))
+                    cv2.resize(self._ros_image_to_numpy(primary), (IMG_SIZE_PRIMARY, IMG_SIZE_PRIMARY))
                     if isinstance(primary, Image)
                     else primary
                 )
                 img_wrist = (
-                    cv2.resize(self._ros_image_to_numpy(wrist), (im_size, im_size))
+                    cv2.resize(self._ros_image_to_numpy(wrist), (IMG_SIZE_WRIST, IMG_SIZE_WRIST))
                     if isinstance(wrist, Image)
                     else wrist
                 )
@@ -352,8 +397,6 @@ class OctoFrankaBridge(Node):
                     "image_primary": np.stack([o["image_primary"] for o in windowed]),
                     "image_wrist": np.stack([o["image_wrist"] for o in windowed]),
                     "proprio": np.stack([o["proprio"] for o in windowed]),
-                    # False = padded frame, True = real frame; shape (window_size,)
-                    # _sample_actions adds batch dim via jax.tree_map -> (1, window_size)
                     "timestep_pad_mask": np.array(
                         [False] * pad_count + [True] * len(obs_history), dtype=bool
                     ),
@@ -364,6 +407,7 @@ class OctoFrankaBridge(Node):
                 action = np.array(policy_fn(obs, task), dtype=np.float64)
                 self.get_logger().info(f"forward pass: {time.time() - t0:.3f}s")
 
+                # safety check on actual joint positions from /joint_states
                 if not self.safety_check():
                     self.get_logger().error("Joint limits exceeded — truncating episode.")
                     truncated = True
@@ -371,9 +415,18 @@ class OctoFrankaBridge(Node):
 
                 # joints_desired update -> /gello/joint_states, gripper -> placeholder
                 joints_desired, gripper_val = self.convert_action(action)
-                self.set_desired_joints(joints_desired)
+
+                new_stamp = primary.header.stamp if isinstance(primary, Image) else None
+                frame_is_new = (new_stamp is not None) and (new_stamp != prev_stamp)
+                self._last_img_stamp = new_stamp
+
+                self.get_logger().info(f"Desired Joints: {joints_desired}\nCurrent Joints: {self._current_joints}\nNew Frame:{frame_is_new}")
+
+                self.ramp_to(joints_desired, duration=3) # move to goal over 3s
+
                 self.send_gripper(gripper_val)
 
+            
             # Episode ended: hold position
             self.toggle_servo(start=False)
 
@@ -394,11 +447,11 @@ def main(argv=None) -> None:
     executor.add_node(node)
     spin_thread = threading.Thread(target=executor.spin, daemon=True)
     spin_thread.start()
-
     try:
         node.load_model()
         node.start_controller()
         node.go_home()
+        node.open_gripper()
         node.get_logger().info("home!!")
 
         node.close_gripper()
@@ -413,3 +466,5 @@ def main(argv=None) -> None:
 
 if __name__ == "__main__":
     app.run(main)
+
+
