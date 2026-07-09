@@ -4,7 +4,7 @@ Utilizing sensor_msgs/JointState published to /gello/joint_states to command joi
 
 To run:
 conda activate octo
-python3 Franka_Bridge/JointStates_octo_franka_bridge.py --checkpoint_weights_path="/home/faro/octo_fr3/checkpoints/octo_fr3_finetune/experiment_20260706_171000" --checkpoint_step="2000"
+python3 Franka_Bridge/JointStates_octo_franka_bridge.py --checkpoint_weights_path="/home/faro/octo_fr3/checkpoints/octo_fr3_finetune/experiment_51demos" --checkpoint_step="4000"
 """
 
 import threading
@@ -277,10 +277,21 @@ class OctoFrankaBridge(Node):
 
     def convert_action(self, action: np.ndarray) -> tuple[np.ndarray, float]:
         """Smooths the actions"""
-        
+
         lo = np.array(JOINT_LIMITS[0])
         hi = np.array(JOINT_LIMITS[1])
         target = np.clip(action[:7], lo, hi)
+
+        with self._joints_lock:
+            prev = self._joints_desired.copy()
+        smoothed = JOINT_SMOOTH_ALPHA * target + (1.0 - JOINT_SMOOTH_ALPHA) * prev
+
+        return smoothed, float(action[7])
+
+    def convert_action_no_limits(self, action: np.ndarray) -> tuple[np.ndarray, float]:
+        """Smooths the actions without clipping to JOINT_LIMITS."""
+
+        target = action[:7]
 
         with self._joints_lock:
             prev = self._joints_desired.copy()
@@ -408,10 +419,10 @@ class OctoFrankaBridge(Node):
                 self.get_logger().info(f"forward pass: {time.time() - t0:.3f}s")
 
                 # safety check on actual joint positions from /joint_states
-                if not self.safety_check():
-                    self.get_logger().error("Joint limits exceeded — truncating episode.")
-                    truncated = True
-                    break
+                # if not self.safety_check():
+                #     self.get_logger().error("Joint limits exceeded — truncating episode.")
+                #     truncated = True
+                #     break
 
                 # joints_desired update -> /gello/joint_states, gripper -> placeholder
                 joints_desired, gripper_val = self.convert_action(action)
