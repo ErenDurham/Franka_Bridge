@@ -4,8 +4,7 @@ Utilizing sensor_msgs/JointState published to /gello/joint_states to command joi
 
 To run:
 conda activate octo
-
-python3 Franka_Bridge/JointStates_octo_franka_bridge.py --checkpoint_weights_path="/home/faro/octo_fr3/checkpoints_v3/octo_fr3_finetune/experiment_20260713_120512" --checkpoint_step="50000"
+python3 Franka_Bridge/test.py --checkpoint_weights_path="/home/faro/octo_fr3/checkpoints_v2/octo_fr3_finetune/experiment_20260710_152129" --checkpoint_step="16000"
 """
 
 import threading
@@ -44,12 +43,13 @@ IMG_SIZE_PRIMARY = 256
 IMG_SIZE_WRIST = 128
 WINDOW_SIZE = 1
 
+# Topic published by the Gello controller: a Float32 in [0.0, 1.0] where
 # 0.0 = fully closed and 1.0 = fully open.
 DEFAULT_GRIPPER_COMMAND_TOPIC = "/gripper/gripper_client/target_gripper_width_percent"
 
 STEP_DURATION = 0.1  # (10 Hz) step size
-MAX_TIMESTEPS = 1000
-JOINT_SMOOTH_ALPHA = 0.5
+MAX_TIMESTEPS = 200
+JOINT_SMOOTH_ALPHA = 0.25
 
 # Gripper controls
 GRIPPER_OPEN_WIDTH = 0.08  # meters
@@ -74,7 +74,7 @@ FR3_JOINTS = [
     "fr3_joint7",
 ]
 
-HOME_JOINTS = np.array([-0.046, 0.242, -0.123, -1.593, 0.100, 1.967, -0.903])
+HOME_JOINTS = np.array([0.0, 0.0, 0.0, -1.57079, 0.0, 1.57079, -0.7853])
 
 flags.DEFINE_string(
     "checkpoint_weights_path", None, "Path to checkpoint", required=True
@@ -115,13 +115,10 @@ class OctoFrankaBridge(Node):
         self._joint_pub = self.create_publisher(JointState, TOPIC_JOINT_CMD, 10)
         self._grip_move_cli = ActionClient(self, GripperMove, "/franka_gripper/move")
 
+        # Creating a timer to ensure there's continuous publishing of joint states
         self._joints_desired = HOME_JOINTS.copy()
         self._joints_lock = threading.Lock()
-        self._ramp_start = None
-        self._ramp_target = None
-        self._ramp_t0 = 0.0
-        self._ramp_duration = 3.0
-        self.create_timer(0.1, self._timer_publish_joints)
+        self.create_timer(0.05, self._timer_publish_joints)
 
     def _cb_image_primary(self, msg: Image) -> None:
         # store latest primary image
@@ -150,30 +147,12 @@ class OctoFrankaBridge(Node):
 
     def _timer_publish_joints(self) -> None:
         with self._joints_lock:
-            if self._ramp_target is not None:
-                alpha = min(1.0, (time.time() - self._ramp_t0) / self._ramp_duration)
-                self._joints_desired = (
-                    self._ramp_start + alpha * (self._ramp_target - self._ramp_start)
-                )
-                if alpha >= 1.0:
-                    self._ramp_target = None
             joints = self._joints_desired.copy()
         self.publish_joint_state(joints)
 
     def set_desired_joints(self, joints: np.ndarray) -> None:
         with self._joints_lock:
-            self._ramp_target = None  # cancel any active ramp
             self._joints_desired = joints.copy()
-
-    def set_ramp_target(self, target: np.ndarray, duration: float = 3.0) -> None:
-        """
-        Start a non-blocking ramp toward desired pose
-        """
-        with self._joints_lock:
-            self._ramp_start = self._joints_desired.copy()
-            self._ramp_target = np.asarray(target, dtype=np.float64).copy()
-            self._ramp_t0 = time.time()
-            self._ramp_duration = max(float(duration), 1e-3)
 
     def load_model(self) -> None:
         self.model = OctoModel.load_pretrained(
@@ -184,13 +163,6 @@ class OctoFrankaBridge(Node):
         self.get_logger().info(f"Dataset statistics keys: {keys}")
         if "action" not in self.model.dataset_statistics:
             raise KeyError(f"'action' not in dataset_statistics. Available: {keys}")
-
-        # gets the stats 
-        if "proprio" not in self.model.dataset_statistics:
-            raise KeyError(f"'proprio' not in dataset_statistics. Available: {keys}")
-        proprio_stats = self.model.dataset_statistics["proprio"]
-        self._proprio_mean = np.array(proprio_stats["mean"], dtype=np.float32)
-        self._proprio_std = np.array(proprio_stats["std"], dtype=np.float32)
 
     def start_controller(self) -> None:
         # spin until first joint state message arrives
@@ -212,29 +184,30 @@ class OctoFrankaBridge(Node):
 
     def ramp_to(self, target: np.ndarray, duration: float = 3.0) -> None:
         """
-        Moves to target pose over the desired seconds 
+        Moves to target pose over the desired seconds.
         """
-        self.set_ramp_target(target, duration)
-        time.sleep(duration)
+        with self._joints_lock:
+            start = self._joints_desired.copy()
+        steps = max(1, int(duration / 0.05))  # 20 Hz
+        for i in range(steps + 1):
+            alpha = i / steps
+            self.set_desired_joints(start + alpha * (target - start))
+            time.sleep(0.05)
 
     def go_home(self) -> None:
-        """
-        Ramp to HOME_JOINTS over 3s.
-        """
-        self.ramp_to(HOME_JOINTS, duration=3.0)
+        """Ramp to HOME_JOINTS over 5 s."""
+        self.ramp_to(HOME_JOINTS, duration=5.0)
         self.get_logger().info("go_home complete")
 
     def _ros_image_to_numpy(self, msg: Image) -> np.ndarray:
-        """
-        Convert a ROS Image message to a (H, W, 3) uint8 RGB numpy array
-        """
+        """Convert a ROS Image message to a (H, W, 3) uint8 numpy array."""
         arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, -1)
         arr = arr[:, :, :3]
         if msg.encoding.lower().startswith("bgr"):
             arr = arr[:, :, ::-1]
-
-        # cv2.imshow("Camera", arr)
-        # cv2.waitKey(1)
+            
+        cv2.imshow("Camera", arr)
+        cv2.waitKey(1)
         return np.ascontiguousarray(arr)
 
     def open_gripper(self) -> None:
@@ -265,7 +238,7 @@ class OctoFrankaBridge(Node):
 
         # find if topic is available
         if not self._grip_move_cli.wait_for_server(timeout_sec=2.0):
-            self.get_logger().warn("Gripper not available!! :(")
+            self.get_logger().warn("franka_gripper/move action server not available!! :(")
             return
 
         goal = GripperMove.Goal()
@@ -280,12 +253,9 @@ class OctoFrankaBridge(Node):
 
     def read_state(self) -> dict:
         q = self._current_joints if self._current_joints is not None else np.zeros(7)
-
+        
         # checkpoint expects 8-dim proprio: 7 arm joints + 1 gripper width
         proprio = np.concatenate([q, [self._gripper_width]]).astype(np.float32)
-
-        # normalize to match training
-        proprio = (proprio - self._proprio_mean) / (self._proprio_std + 1e-8)
         return {
             "joints": q,
             "proprio": proprio,
@@ -312,9 +282,7 @@ class OctoFrankaBridge(Node):
         return primary, wrist
 
     def convert_action(self, action: np.ndarray) -> tuple[np.ndarray, float]:
-        """
-        Smooths the actions
-        """
+        """Smooths the actions"""
 
         lo = np.array(JOINT_LIMITS[0])
         hi = np.array(JOINT_LIMITS[1])
@@ -327,9 +295,7 @@ class OctoFrankaBridge(Node):
         return smoothed, float(action[7])
 
     def convert_action_no_limits(self, action: np.ndarray) -> tuple[np.ndarray, float]:
-        """
-        Smooths the actions without clipping to JOINT_LIMITS (Debug function)
-        """
+        """Smooths the actions without clipping to JOINT_LIMITS."""
 
         target = action[:7]
 
@@ -362,11 +328,9 @@ class OctoFrankaBridge(Node):
         policy_fn = supply_rng(partial(_sample_actions, self.model))
 
         goal_image = jnp.zeros((IMG_SIZE_PRIMARY, IMG_SIZE_PRIMARY, 3), dtype=np.uint8)
-        # must exactly match the instruction the 51 demos were labeled with
-        goal_instruction = "Pick up the green pepper and place it in bin"
+        goal_instruction = "Pick up the green pepper and put it in the bin"
 
         while True:
-            self.go_home()
             # Goal selection
             modality = click.prompt(
                 "Language or goal image?", type=click.Choice(["l", "g"])
@@ -406,7 +370,6 @@ class OctoFrankaBridge(Node):
             self.toggle_servo(start=True)
 
             ########## Control loop  ###############
-            
             obs_history: list[dict] = []
             last_tstep = time.time()
             truncated = False
@@ -476,9 +439,7 @@ class OctoFrankaBridge(Node):
 
                 self.get_logger().info(f"Desired Joints: {joints_desired}\nCurrent Joints: {self._current_joints}\nNew Frame:{frame_is_new}")
 
-                # Non-blocking: the 10 Hz publish timer ramps the command toward
-                # this target over 3 s while the loop keeps observing/inferring.
-                self.set_ramp_target(joints_desired, duration=0.1)
+                self.ramp_to(joints_desired, duration=3) # move to goal over 3s
 
                 self.send_gripper(gripper_val)
 
@@ -510,7 +471,8 @@ def main(argv=None) -> None:
         node.open_gripper()
         node.get_logger().info("home!!")
 
-        # gripper stays OPEN — all demos start with the gripper open
+        node.close_gripper()
+        node.get_logger().info("Gripper closed!")
         node.main()
     finally:
         node.stop_controller()
