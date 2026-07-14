@@ -1,4 +1,4 @@
-# octo_fr3 — pipeline code
+# Pipeline Code
 
 Octo finetuning on a Franka FR3: GELLO teleop demos → rosbags → HDF5 → TFDS → finetuned checkpoint.
 
