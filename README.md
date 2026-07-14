@@ -1,7 +1,6 @@
 # octo_fr3 — pipeline code
 
 Octo finetuning on a Franka FR3: GELLO teleop demos → rosbags → HDF5 → TFDS → finetuned checkpoint.
-This repo holds the pipeline code only; bags, HDF5/TFDS data, checkpoints, the `fr3_demo_dataset` TFDS builder package, and the (locally modified) octo repo live outside it — paths are set in `pipeline.env`.
 
 ## Files
 
