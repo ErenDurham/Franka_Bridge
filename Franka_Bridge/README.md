@@ -1,5 +1,7 @@
 # Franka Bridge
 
+Written by Eren D.
+
 Code to bridge the Octo model and the Franka robot. Different backends are written to experiment and find the best setup.
 
 ---

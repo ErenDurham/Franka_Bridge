@@ -1,4 +1,5 @@
 """
+Written by Eren D.
 Code to test the bridge the octo model and the Franka robot WITHOUT Octo to ensure logic is right
 
 Utilizing sensor_msgs/JointState published to /gello/joint_states to command joint positions

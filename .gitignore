@@ -1,6 +1,8 @@
-Deoxys_octo_franka_bridge.py
-example_model.py
-franka_env.py
-MoveIt_octo_franka_bridge.py
-aio-franka-circle_demo.py
-.directory
+Franka_Bridge/Deoxys_octo_franka_bridge.py
+Franka_Bridge/example_model.py
+Franka_Bridge/franka_env.py
+Franka_Bridge/MoveIt_octo_franka_bridge.py
+Franka_Bridge/aio-franka-circle_demo.py
+Franka_Bridge/.directory
+__pycache__/
+*.pyc
