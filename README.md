@@ -11,10 +11,12 @@ extract_bags_OldCam.py        same, for the old ~2.4 Hz camera bags (one step pe
                               frame; action = command at the next frame)
 build_dataset.py              HDF5 → TFDS (imports the external fr3_demo_dataset package)
 fr3_dataset_builder.py        outdated draft builder — reference only, do not build with it
-finetune_config.py            Octo finetuning config (modes: full | head_mlp_only | head_only)
+finetune_config.py            Octo finetuning config for the 10 Hz dataset
+finetune_config_oldCam.py     same, for the ~2.4 Hz oldcam dataset (tfds_output_oldcam)
 fr3_standardize_fn.py         maps dataset keys to Octo's expected obs/action format
 Image_Publisher.py            camera-machine node: RealSense → ROS2 topics + MP4 recording
 Franka_Bridge/                deployment: Octo checkpoint → FR3 joint impedance control
+tfds_output_oldcam/           built TFDS dataset for the oldcam data (train 45 / val 6 eps)
 Makefile                      convenience targets
 ```
 
@@ -28,15 +30,31 @@ Makefile                      convenience targets
 ```
 
 ## Requirements
+Python 3.10 (`conda create -n octo_fr3 python=3.10`)
 
-Python 3.10, then:
+### Python packages
+
+Install octo with its dependencies, then the CUDA build of JAX:
+
 
 ```bash
-pip install numpy==1.24.3 ml-dtypes==0.2.0 scipy==1.11.4 protobuf==3.20.3 \
-    tensorflow==2.15.0 tensorflow-datasets==4.9.2 tensorflow-metadata==1.13.0 \
-    tensorflow-probability==0.23.0 flax==0.7.5 optax==0.1.5 chex==0.1.85 \
-    distrax==0.1.5 "ml-collections>=0.1.0" h5py opencv-python==4.8.1.78 pyyaml \
-    "wandb>=0.12.14" "transformers>=4.34.1"
+pip install -e <path-to-octo-repo>
 pip install "jax[cuda12_pip]==0.4.20" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
-pip install -e <path-to-octo-repo> --no-deps
+pip install protobuf==3.20.3 transformers==4.34.1 "setuptools<81"
+pip install h5py opencv-python==4.8.1.78 pyyaml
+python -c "import jax; print(jax.devices())"
+```
+
+- `transformers==4.34.1` — transformers 5.x dropped Flax, octo's T5 encoder crashes (`cannot import FlaxAutoModel`)
+- `setuptools<81` — newer removes `pkg_resources`, which wandb 0.15.x needs
+
+`octo` is installed editable. If the octo folder moves, re-run `pip install -e`.
+
+### GPU
+
+jaxlib 0.4.20 picks up whatever `ptxas` is first on PATH. If `ptxas --version` shows < CUDA 12 (or a GPU test fails with `CUDA_ERROR_INVALID_IMAGE` / "ptxas does not support CC ..."), put the pip-installed one first:
+
+```bash
+export PATH="$(python -c 'import site; print(site.getsitepackages()[0])')/nvidia/cuda_nvcc/bin:$PATH"
+python -c "import jax.numpy as jnp; print((jnp.ones(3)+1).sum())"   # expect 6.0
 ```

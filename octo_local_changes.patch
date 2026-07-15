@@ -1,0 +1,101 @@
+diff --git a/octo/model/components/transformer.py b/octo/model/components/transformer.py
+index ea1a3e1..3baa361 100644
+--- a/octo/model/components/transformer.py
++++ b/octo/model/components/transformer.py
+@@ -215,8 +215,12 @@ class Transformer(nn.Module):
+             x = nn.Dropout(rate=self.dropout_rate)(x, deterministic=not train)
+ 
+         # Input Encoder
++        # nn.remat (gradient checkpointing) avoids storing per-layer attention
++        # matrices and MLP activations during the forward pass; they are recomputed
++        # during backward instead.  Saves ~3 GB on a 706-token sequence with ViT-B.
++        CheckpointedBlock = nn.remat(Encoder1DBlock, prevent_cse=False)
+         for lyr in range(self.num_layers):
+-            x = Encoder1DBlock(
++            x = CheckpointedBlock(
+                 mlp_dim=self.mlp_dim,
+                 dropout_rate=self.dropout_rate,
+                 attention_dropout_rate=self.attention_dropout_rate,
+diff --git a/scripts/finetune.py b/scripts/finetune.py
+index 4340946..17c025c 100644
+--- a/scripts/finetune.py
++++ b/scripts/finetune.py
+@@ -314,7 +314,10 @@ def main(_):
+ 
+     if FLAGS.config.modality == "image_conditioned":
+         modes_to_evaluate = ["image_conditioned"]
+-    elif FLAGS.config.modality == "text_conditioned":
++    elif FLAGS.config.modality in ("language_conditioned", "text_conditioned"):
++        # "language_conditioned" is the name used in finetune_config.py;
++        # the validation callback's supported mode string is "text_conditioned"
++        # (see train_callbacks.py — it calls remove_images() for this mode).
+         modes_to_evaluate = ["text_conditioned"]
+     elif FLAGS.config.modality == "multimodal":
+         modes_to_evaluate = ["image_conditioned", "text_conditioned"]
+@@ -365,6 +368,16 @@ def main(_):
+     def wandb_log(info, step):
+         wandb.log(flatten_dict(info, sep="/"), step=step)
+ 
++    # Early stopping on validation-metric plateau (configured via
++    # config.early_stopping; absent/disabled = train the full num_steps).
++    early_stop = FLAGS.config.get("early_stopping", None)
++    if early_stop is not None and not early_stop.enabled:
++        early_stop = None
++    best_val = float("inf")
++    best_step = 0
++    evals_since_improve = 0
++    should_stop = False
++
+     timer = Timer()
+     for i in tqdm.tqdm(
+         range(0, int(FLAGS.config.num_steps)),
+@@ -394,6 +407,30 @@ def main(_):
+                 val_metrics = val_callback(train_state, i + 1)
+                 wandb_log(val_metrics, step=i)
+ 
++            if early_stop is not None:
++                flat = flatten_dict(val_metrics, sep="/")
++                vals = [
++                    float(v)
++                    for k, v in flat.items()
++                    if k.endswith("/" + early_stop.metric)
++                ]
++                if vals:
++                    cur = sum(vals) / len(vals)
++                    if cur < best_val * (1.0 - early_stop.min_delta_pct / 100.0):
++                        best_val, best_step, evals_since_improve = cur, i + 1, 0
++                    else:
++                        evals_since_improve += 1
++                    logging.info(
++                        f"[early-stop] val {early_stop.metric}={cur:.5f} | "
++                        f"best={best_val:.5f} @ step {best_step} | "
++                        f"{evals_since_improve}/{early_stop.patience} evals without improvement"
++                    )
++                    if (
++                        (i + 1) >= early_stop.min_steps
++                        and evals_since_improve >= early_stop.patience
++                    ):
++                        should_stop = True
++
+             with timer("visualize"):
+                 viz_metrics = viz_callback(train_state, i + 1)
+                 wandb_log(viz_metrics, step=i)
+@@ -407,6 +444,18 @@ def main(_):
+             logging.info("Saving checkpoint...")
+             save_callback(train_state, i + 1)
+ 
++        if should_stop:
++            # ensure the stopping step is checkpointed even if it doesn't fall
++            # on a save_interval boundary
++            if save_dir is not None and (i + 1) % FLAGS.config.save_interval != 0:
++                save_callback(train_state, i + 1)
++            logging.info(
++                f"[early-stop] validation {early_stop.metric} plateaued — stopping at "
++                f"step {i + 1}. Best {early_stop.metric}={best_val:.5f} was at "
++                f"checkpoint step {best_step} — deploy that checkpoint."
++            )
++            break
++
+ 
+ if __name__ == "__main__":
+     app.run(main)
