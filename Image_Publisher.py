@@ -46,8 +46,8 @@ from sensor_msgs.msg import Image
 # ---------------- CONFIG ----------------
 PRIMARY_SERIAL = "220422302020"   # D455 third-person
 WRIST_SERIAL   = "919122070892"   # D435 wrist
-STREAM_WIDTH   = 1280
-STREAM_HEIGHT  = 720
+STREAM_WIDTH   = 640
+STREAM_HEIGHT  = 360
 STREAM_FPS     = 15
 RATE_HZ        = 15
 
@@ -73,14 +73,11 @@ def start_cam(serial: str) -> rs.pipeline:
         STREAM_WIDTH, STREAM_HEIGHT,
         rs.format.bgr8, STREAM_FPS,
     )
-    pipe.start(cfg)
+    profile = pipe.start(cfg)
+    color = profile.get_device().first_color_sensor()
+    if color.supports(rs.option.auto_exposure_priority):
+        color.set_option(rs.option.auto_exposure_priority, 0)
     return pipe
-
-
-def grab_raw_frame(pipe: rs.pipeline) -> np.ndarray:
-    """Return the raw 1280x720 BGR frame as-is — no conversion, no resize."""
-    frame = pipe.wait_for_frames().get_color_frame()
-    return np.ascontiguousarray(np.asanyarray(frame.get_data()))
 
 
 def numpy_to_image_msg(bgr: np.ndarray, stamp, frame_id: str) -> Image:
@@ -146,6 +143,11 @@ class ImagePublisher(Node):
         self.primary_pipe = start_cam(PRIMARY_SERIAL)
         self.wrist_pipe   = start_cam(WRIST_SERIAL)
 
+        self._last_primary:  np.ndarray | None = None
+        self._last_wrist:    np.ndarray | None = None
+        self._stamp_primary          = None
+        self._stamp_wrist            = None
+
         self.pub_primary = self.create_publisher(
             Image, "/camera/primary/image_raw", qos)
         self.pub_wrist   = self.create_publisher(
@@ -175,26 +177,33 @@ class ImagePublisher(Node):
     # ── camera tick ──────────────────────────────────────────────────────────
 
     def tick(self):
-        primary_bgr = grab_raw_frame(self.primary_pipe)
-        wrist_bgr   = grab_raw_frame(self.wrist_pipe)
-        stamp       = self.get_clock().now().to_msg()
+        frames = self.primary_pipe.poll_for_frames()
+        if frames:
+            color = frames.get_color_frame()
+            if color:
+                self._last_primary = np.asanyarray(color.get_data()).copy()
+                self._stamp_primary = self.get_clock().now().to_msg()
+                primary_pub = cv2.resize(self._last_primary, (PUB_WIDTH, PUB_HEIGHT),
+                                         interpolation=cv2.INTER_AREA)
+                self.pub_primary.publish(
+                    numpy_to_image_msg(primary_pub, self._stamp_primary, "camera_primary"))
 
-        # publish downscaled frames to ROS2 topics (full-res goes to MP4 only)
-        primary_pub = cv2.resize(primary_bgr, (PUB_WIDTH, PUB_HEIGHT),
-                                 interpolation=cv2.INTER_AREA)
-        wrist_pub   = cv2.resize(wrist_bgr,   (PUB_WIDTH, PUB_HEIGHT),
-                                 interpolation=cv2.INTER_AREA)
-        self.pub_primary.publish(
-            numpy_to_image_msg(primary_pub, stamp, "camera_primary"))
-        self.pub_wrist.publish(
-            numpy_to_image_msg(wrist_pub,   stamp, "camera_wrist"))
+        frames = self.wrist_pipe.poll_for_frames()
+        if frames:
+            color = frames.get_color_frame()
+            if color:
+                self._last_wrist = np.asanyarray(color.get_data()).copy()
+                self._stamp_wrist = self.get_clock().now().to_msg()
+                wrist_pub = cv2.resize(self._last_wrist, (PUB_WIDTH, PUB_HEIGHT),
+                                       interpolation=cv2.INTER_AREA)
+                self.pub_wrist.publish(
+                    numpy_to_image_msg(wrist_pub, self._stamp_wrist, "camera_wrist"))
 
-        # write to MP4 if recording
         if self._recording:
-            if self._writer_primary is not None:
-                self._writer_primary.write(primary_bgr)
-            if self._writer_wrist is not None:
-                self._writer_wrist.write(wrist_bgr)
+            if self._writer_primary is not None and self._last_primary is not None:
+                self._writer_primary.write(self._last_primary)
+            if self._writer_wrist is not None and self._last_wrist is not None:
+                self._writer_wrist.write(self._last_wrist)
 
     # ── rosbag + video control ────────────────────────────────────────────────
 

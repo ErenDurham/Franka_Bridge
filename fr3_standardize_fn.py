@@ -55,16 +55,24 @@ def fr3_dataset_transform(trajectory: dict) -> dict:
 
     trajectory["observation"]["proprio"] = proprio
 
-    # ── image keys are already named correctly for Octo ───────────────────────
-    # "image_primary" and "image_wrist" match Octo's expected keys when
-    # image_obs_keys = {"primary": "image_primary", "wrist": "image_wrist"}
-    # in FINETUNING_KWARGS — no renaming needed.
-
     # ── language instruction ───────────────────────────────────────────────────
-    # dlimp places episode-level TFDS fields (those outside "steps") under
-    # traj_metadata, not at the top level.  dataset.py's sample_match_keys_uniform
-    # only searches top-level keys, so we hoist it here.
-    # After this, language_key="language_instruction" in FINETUNING_KWARGS resolves.
     trajectory["language_instruction"] = trajectory["traj_metadata"]["language_instruction"]
+
+    return trajectory
+
+
+def fr3_dataset_transform_delta(trajectory: dict) -> dict:
+    """
+    Transform a single trajectory from FR3 dataset format to Octo format, and
+    convert the action to a delta relative to the current joint positions.
+    """
+    trajectory = fr3_dataset_transform(trajectory)
+
+    joint_deltas = (
+        trajectory["action"][:, :7] - trajectory["observation"]["joint_positions"]
+    )
+    trajectory["action"] = tf.concat(
+        [joint_deltas, trajectory["action"][:, 7:]], axis=-1
+    )
 
     return trajectory

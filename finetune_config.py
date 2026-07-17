@@ -66,17 +66,14 @@ def get_config(config_string="full,language_conditioned"):
         # Language instruction key (set in fr3_standardize_fn under task)
         "language_key": "language_instruction",
 
-        # Normalize actions — True means normalize that dimension.
-        # 8 dimensions total: 7 joint positions (normalize) + 1 gripper (don't normalize)
-        # Gripper is already in a meaningful [0,1] range so skip normalization.
+        # Normalize actions 
         "action_normalization_mask": [True, True, True, True, True, True, True, False],
 
         # Action normalization strategy
         "action_proprio_normalization_type": "normal",
 
-        # Your custom standardize function
         "standardize_fn": ModuleSpec.create(
-            "fr3_standardize_fn:fr3_dataset_transform"
+            "fr3_standardize_fn:fr3_dataset_transform_delta"
         ),
     }
 
