@@ -2,6 +2,8 @@
 Written by Eren D.
 Previous code that I wrote to control gripper and connecting to an arduino
 Using this file as reference for how to use gripper
+
+Everytime GELLO gripper opens or closes, an Arduino is notified via serial port.
 """
 
 import rclpy

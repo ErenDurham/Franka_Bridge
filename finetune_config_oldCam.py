@@ -1,10 +1,6 @@
 """
 Written by: Makhtar N.
 
-finetune_config_oldCam.py  —  FR3 joint-position finetuning config for Octo,
-for the OLD-CAMERA (~2.4 Hz) dataset built by extract_bags_OldCam.py
-(tfds_output_oldcam).
-
 Usage (direct — run from the octo repo):
    export PYTHONPATH=<this-folder>:$PYTHONPATH && \
    python scripts/finetune.py \

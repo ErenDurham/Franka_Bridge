@@ -1,6 +1,6 @@
 # Pipeline Code
 
-Octo finetuning on a Franka FR3: GELLO teleop demos → rosbags → HDF5 → TFDS → finetuned checkpoint.
+Octo finetuning on a Franka FR3: GELLO teleop demos -> rosbags -> HDF5 -> TFDS -> finetuned checkpoint.
 
 ## Files
 
@@ -10,7 +10,7 @@ extract_bags.py               rosbags → HDF5 episodes, 10 Hz grid
 extract_bags_OldCam.py        same, for the old ~2.4 Hz camera bags (one step per camera
                               frame; action = command at the next frame)
 build_dataset.py              HDF5 → TFDS (imports the external fr3_demo_dataset package)
-fr3_dataset_builder.py        outdated draft builder — reference only, do not build with it
+fr3_dataset_builder.py        dataset builder
 finetune_config.py            Octo finetuning config for the 10 Hz dataset
 finetune_config_oldCam.py     same, for the ~2.4 Hz oldcam dataset (tfds_output_oldcam)
 fr3_standardize_fn.py         maps dataset keys to Octo's expected obs/action format

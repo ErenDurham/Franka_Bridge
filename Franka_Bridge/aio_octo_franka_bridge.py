@@ -1,6 +1,7 @@
 """
 Written by Eren D.
 Code to bridge the octo model and the Franka robot
+
 Utilizing aiofranka FrankaRemoteController with OSC to control the robot through EE pose targets
 """
 

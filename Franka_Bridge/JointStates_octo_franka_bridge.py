@@ -5,7 +5,6 @@ Utilizing sensor_msgs/JointState published to /gello/joint_states to command joi
 
 To run:
 conda activate octo
-
 python3 src/Franka_Bridge/JointStates_octo_franka_bridge.py --checkpoint_weights_path="/home/faro/octo_fr3/checkpoints_fixed/octo_fr3_finetune/experiment_20260716_110912" --checkpoint_step="50000"
     For models not finetuned on deltas: add --action_mode=abs
 """

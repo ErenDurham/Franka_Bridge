@@ -5,14 +5,6 @@ extract_bags_OldCam.py
 
 Converts ROS2 Humble rosbags from FR3 demonstrations into per-episode HDF5 files.
 
-Variant for the OLD camera recordings (pre-July-14 bags), where frame drops
-over the network left only ~2.4 Hz of images in the bag despite the 15 Hz
-publisher. The dataset grid is set to one step per camera frame (~2.4 Hz),
-and actions are re-paired so that observation o_t is labelled with the
-command at the NEXT camera frame, a_{t+1}: the last ACTION_SHIFT entries of
-the observation arrays and the first ACTION_SHIFT entries of the action
-array are dropped (see shift_actions).
-
 Usage:
     python extract_bags_OldCam.py \
         --bag_dir /path/to/bags \
@@ -31,11 +23,6 @@ Topics used:
     Actions (what was commanded):
         /gello/joint_states                                     -> joint_action (7,)
         /gripper/gripper_client/target_gripper_width_percent    -> gripper_action (1,)
-
-    NOTE: /franka_robot_state_broadcaster/desired_joint_states is NOT used as
-    the action source — with our joint impedance controller that topic holds a
-    stale constant value for the entire bag. The GELLO leader-arm commands on
-    /gello/joint_states are the true control signal.
 """
 
 import os

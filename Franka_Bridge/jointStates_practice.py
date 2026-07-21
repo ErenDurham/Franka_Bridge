@@ -1,5 +1,6 @@
 """
 Written by Eren D.
+
 Moves robot with joint states 
 Moves robot wrist in a sinusoidal motion
 """

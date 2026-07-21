@@ -1,6 +1,7 @@
 """
 Written by Eren D.
 Code to control the Franka robot via aiofranka FrankaRemoteController with OSC.
+
 Moves the end-effector to a target pose within the safe workspace bounds.
 """
 

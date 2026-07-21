@@ -23,11 +23,6 @@ Topics used:
     Actions (what was commanded):
         /gello/joint_states                                     -> joint_action (7,)
         /gripper/gripper_client/target_gripper_width_percent    -> gripper_action (1,)
-
-    NOTE: /franka_robot_state_broadcaster/desired_joint_states is NOT used as
-    the action source — with our joint impedance controller that topic holds a
-    stale constant value for the entire bag. The GELLO leader-arm commands on
-    /gello/joint_states are the true control signal.
 """
 
 import os
